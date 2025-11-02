@@ -1,6 +1,11 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+
+from database import db, create_document, get_documents
+from schemas import Waitlist
 
 app = FastAPI()
 
@@ -33,9 +38,6 @@ def test_database():
     }
     
     try:
-        # Try to import database module
-        from database import db
-        
         if db is not None:
             response["database"] = "✅ Available"
             response["database_url"] = "✅ Configured"
@@ -52,17 +54,66 @@ def test_database():
         else:
             response["database"] = "⚠️  Available but not initialized"
             
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
     except Exception as e:
         response["database"] = f"❌ Error: {str(e)[:50]}"
     
     # Check environment variables
-    import os
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
     
     return response
+
+# -------------------- Waitlist API --------------------
+
+class WaitlistCreate(Waitlist):
+    pass
+
+@app.post("/waitlist")
+def create_waitlist_entry(payload: WaitlistCreate):
+    """Create a waitlist entry in MongoDB"""
+    try:
+        new_id = create_document("waitlist", payload)
+        return {"id": new_id, "message": "Thanks for joining the waitlist!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waitlist/count")
+def get_waitlist_count():
+    """Return the total number of waitlist entries"""
+    try:
+        if db is None:
+            raise Exception("Database not available")
+        count = db["waitlist"].count_documents({})
+        return {"count": int(count)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/waitlist/recent")
+def get_recent_waitlist(limit: int = 5):
+    """Return recent waitlist entries (anonymized emails)"""
+    try:
+        docs = get_documents("waitlist", {}, limit)
+        # Anonymize emails for frontend display
+        def mask(email: Optional[str]):
+            if not email or "@" not in email:
+                return "hidden"
+            name, domain = email.split("@", 1)
+            if len(name) <= 2:
+                masked = name[0] + "*"
+            else:
+                masked = name[0] + "*" * (len(name) - 2) + name[-1]
+            return f"{masked}@{domain}"
+        sanitized = [
+            {
+                "email": mask(doc.get("email")),
+                "name": doc.get("name", "Friend"),
+                "created_at": doc.get("created_at")
+            }
+            for doc in docs
+        ]
+        return {"items": sanitized}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
